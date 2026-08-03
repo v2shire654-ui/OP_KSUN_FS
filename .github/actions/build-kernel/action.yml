@@ -1338,7 +1338,7 @@ runs:
               FENGCHI_DIR="$KERNEL_PATCHES_FOLDER/oneplus/hmbird" ;;
           esac
           dos2unix "$FENGCHI_DIR/fengchi_${HMBIRD_MODEL}_${OP_OS_VERSION}.patch"
-          patch -p1 -F 3 < "$FENGCHI_DIR/fengchi_${HMBIRD_MODEL}_${OP_OS_VERSION}.patch"
+          patch -p1 -F 3 < "$FENGCHI_DIR/fengchi_${HMBIRD_MODEL}_${OP_OS_VERSION}.patch" || true
           dos2unix "$KERNEL_PATCHES_FOLDER/oneplus/hmbird/overwriter.patch"
           patch -p1 -F 3 < "$KERNEL_PATCHES_FOLDER/oneplus/hmbird/overwriter.patch"
           chmod +x ./drivers/of/overwriter/overwrite_configs/convert_configs.sh
