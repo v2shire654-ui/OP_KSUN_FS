@@ -21,13 +21,19 @@ jobs:
           libssl-dev libncurses5-dev lzop zip zlib1g-dev \
           gcc-multilib lib32z1-dev device-tree-compiler
 
-    - name: Setup toolchain (GCC 4.9)
+    - name: Setup toolchain (Linaro GCC 4.9)
       run: |
         mkdir -p $HOME/toolchains
         cd $HOME/toolchains
-        git clone --depth=1 https://github.com/arter97/arm-linux-androideabi-4.9.git \
-          -b master arm-eabi-4.9
+        git clone --depth=1 \
+          https://github.com/arter97/arm-linux-androideabi-4.9.git \
+          -b cm-12.0 arm-eabi-4.9
         echo "$HOME/toolchains/arm-eabi-4.9/bin" >> $GITHUB_PATH
+        if [ ! -x "$HOME/toolchains/arm-eabi-4.9/bin/arm-eabi-gcc" ]; then
+          echo "::error::arm-eabi-gcc not found after clone!"
+          exit 1
+        fi
+        "$HOME/toolchains/arm-eabi-4.9/bin/arm-eabi-gcc" --version
 
     - name: Clone kernel source (zImage)
       run: |
@@ -56,18 +62,16 @@ jobs:
     - name: Verify critical files
       run: |
         cd kernel_s3ve3g
-        # Defconfig
         if [ ! -f arch/arm/configs/lineageos_s3ve3g_defconfig ]; then
           echo "::error::Defconfig lineageos_s3ve3g_defconfig not found!"
           exit 1
         fi
         echo "Defconfig OK"
 
-        # DTS files in msm8226 repo
         cd ../kernel_msm8226
         DTS_COUNT=$(find arch/arm/boot/dts -name "msm8226-sec-s3ve3geur*.dts" 2>/dev/null | wc -l)
         if [ "$DTS_COUNT" -eq 0 ]; then
-          echo "::error::No DTS files in msm8226 repo!"
+          echo "::error::No DTS files msm8226-sec-s3ve3geur*.dts in msm8226 repo!"
           find arch/arm/boot/dts -name "*.dts" | head -20
           exit 1
         fi
@@ -113,7 +117,6 @@ jobs:
 
     - name: Build dt.img
       run: |
-        # Copy DTS files from msm8226 repo into s3ve3g kernel tree
         cp kernel_msm8226/arch/arm/boot/dts/msm8226-sec-s3ve3geur*.dts \
            kernel_s3ve3g/arch/arm/boot/dts/
 
@@ -122,10 +125,8 @@ jobs:
         export CROSS_COMPILE=$HOME/toolchains/arm-eabi-4.9/bin/arm-eabi-
         export PATH=$HOME/toolchains/arm-eabi-4.9/bin:$PATH
 
-        # Compile DTS to DTB
         make ARCH=arm CROSS_COMPILE=$CROSS_COMPILE dtbs -j$(nproc) 2>&1 | tee -a ../build.log
 
-        # Run dtbToolCM
         $HOME/dtbToolCM-build/dtbToolCM \
           -o arch/arm/boot/dt.img \
           -s 2048 \
