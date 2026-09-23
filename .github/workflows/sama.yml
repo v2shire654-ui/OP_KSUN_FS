@@ -1,1 +1,219 @@
+name: Build S3 Neo+ Kernel (LineageOS 14.1)
 
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          bc bison build-essential ccache flex git \
+          libssl-dev libncurses5-dev lzop zip zlib1g-dev \
+          gcc-multilib lib32z1-dev device-tree-compiler
+
+    - name: Setup toolchain (GCC 4.9)
+      run: |
+        mkdir -p $HOME/toolchains
+        cd $HOME/toolchains
+        git clone --depth=1 https://github.com/arter97/arm-linux-androideabi-4.9.git \
+          -b master arm-eabi-4.9
+        echo "$HOME/toolchains/arm-eabi-4.9/bin" >> $GITHUB_PATH
+
+    - name: Clone kernel source (zImage)
+      run: |
+        git clone --depth=1 \
+          https://github.com/S3NEO/android_kernel_samsung_s3ve3g.git \
+          -b lineage-14.1 kernel_s3ve3g
+        cd kernel_s3ve3g
+        echo "KERNEL_S3VE3G_COMMIT=$(git rev-parse HEAD)" >> $GITHUB_ENV
+
+    - name: Clone kernel source (DTS/DTB)
+      run: |
+        git clone --depth=1 \
+          https://github.com/S3NEO/android_kernel_samsung_msm8226.git \
+          -b lineage-14.1 kernel_msm8226
+        cd kernel_msm8226
+        echo "KERNEL_MSM8226_COMMIT=$(git rev-parse HEAD)" >> $GITHUB_ENV
+
+    - name: Clone dtbToolCM source
+      run: |
+        git clone --depth=1 \
+          https://github.com/LineageOS/android_device_qcom_common.git \
+          -b cm-14.1 qcom_common
+        cd qcom_common
+        echo "QCOM_COMMON_COMMIT=$(git rev-parse HEAD)" >> $GITHUB_ENV
+
+    - name: Verify critical files
+      run: |
+        cd kernel_s3ve3g
+        # Defconfig
+        if [ ! -f arch/arm/configs/lineageos_s3ve3g_defconfig ]; then
+          echo "::error::Defconfig lineageos_s3ve3g_defconfig not found!"
+          exit 1
+        fi
+        echo "Defconfig OK"
+
+        # DTS files in msm8226 repo
+        cd ../kernel_msm8226
+        DTS_COUNT=$(find arch/arm/boot/dts -name "msm8226-sec-s3ve3geur*.dts" 2>/dev/null | wc -l)
+        if [ "$DTS_COUNT" -eq 0 ]; then
+          echo "::error::No DTS files in msm8226 repo!"
+          find arch/arm/boot/dts -name "*.dts" | head -20
+          exit 1
+        fi
+        echo "Found $DTS_COUNT DTS files"
+
+    - name: Build dtbToolCM
+      run: |
+        cd qcom_common/dtbtool
+        mkdir -p $HOME/dtbToolCM-build
+        gcc -Wall -o $HOME/dtbToolCM-build/dtbToolCM dtbtool.c
+        if [ ! -f $HOME/dtbToolCM-build/dtbToolCM ]; then
+          echo "::error::Failed to build dtbToolCM!"
+          exit 1
+        fi
+
+    - name: Build kernel zImage
+      run: |
+        cd kernel_s3ve3g
+        export ARCH=arm
+        export CROSS_COMPILE=$HOME/toolchains/arm-eabi-4.9/bin/arm-eabi-
+        export PATH=$HOME/toolchains/arm-eabi-4.9/bin:$PATH
+
+        make ARCH=arm CROSS_COMPILE=$CROSS_COMPILE \
+            lineageos_s3ve3g_defconfig
+        make ARCH=arm CROSS_COMPILE=$CROSS_COMPILE \
+            -j$(nproc) 2>&1 | tee ../build.log
+
+    - name: Verify zImage
+      run: |
+        cd kernel_s3ve3g
+        if [ ! -f arch/arm/boot/zImage ]; then
+          echo "::error::zImage not found!"
+          tail -100 ../build.log
+          exit 1
+        fi
+        FILE_TYPE=$(file arch/arm/boot/zImage)
+        echo "zImage: $FILE_TYPE"
+        echo "$FILE_TYPE" | grep -qi "ARM" || { echo "::error::Not ARM!"; exit 1; }
+
+        SIZE=$(stat -c "%s" arch/arm/boot/zImage)
+        echo "zImage size: $SIZE bytes"
+        sha256sum arch/arm/boot/zImage | tee ../zImage.sha256
+
+    - name: Build dt.img
+      run: |
+        # Copy DTS files from msm8226 repo into s3ve3g kernel tree
+        cp kernel_msm8226/arch/arm/boot/dts/msm8226-sec-s3ve3geur*.dts \
+           kernel_s3ve3g/arch/arm/boot/dts/
+
+        cd kernel_s3ve3g
+        export ARCH=arm
+        export CROSS_COMPILE=$HOME/toolchains/arm-eabi-4.9/bin/arm-eabi-
+        export PATH=$HOME/toolchains/arm-eabi-4.9/bin:$PATH
+
+        # Compile DTS to DTB
+        make ARCH=arm CROSS_COMPILE=$CROSS_COMPILE dtbs -j$(nproc) 2>&1 | tee -a ../build.log
+
+        # Run dtbToolCM
+        $HOME/dtbToolCM-build/dtbToolCM \
+          -o arch/arm/boot/dt.img \
+          -s 2048 \
+          -p arch/arm/boot/dts/ \
+          arch/arm/boot/dts/
+
+        if [ ! -f arch/arm/boot/dt.img ]; then
+          echo "::error::dt.img not found!"
+          exit 1
+        fi
+        SIZE=$(stat -c "%s" arch/arm/boot/dt.img)
+        echo "dt.img size: $SIZE bytes"
+        [ "$SIZE" -gt 0 ] || { echo "::error::dt.img is empty!"; exit 1; }
+        sha256sum arch/arm/boot/dt.img | tee ../dt.img.sha256
+
+    - name: Upload build log
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-log
+        path: build.log
+
+    - name: Upload raw kernel image and dt.img
+      uses: actions/upload-artifact@v4
+      with:
+        name: kernel-image
+        path: |
+          kernel_s3ve3g/arch/arm/boot/zImage
+          kernel_s3ve3g/arch/arm/boot/dt.img
+          zImage.sha256
+          dt.img.sha256
+
+    - name: Prepare AnyKernel3
+      run: |
+        git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git anykernel3
+
+        cp kernel_s3ve3g/arch/arm/boot/zImage anykernel3/zImage
+        cp kernel_s3ve3g/arch/arm/boot/dt.img anykernel3/dt.img
+
+        cat > anykernel3/anykernel.sh << 'EOF'
+        ### AnyKernel3 Ramdisk Mod Script
+        ## osm0sis @ xda-developers
+
+        properties() { '
+        kernel.string=S3 Neo+ LineageOS 14.1 Kernel (GT-I9301I)
+        do.devicecheck=1
+        do.modules=0
+        do.systemless=1
+        do.cleanup=1
+        do.cleanuponabort=0
+        device.name1=s3ve3g
+        device.name2=s3ve3gds
+        device.name3=s3ve3gjv
+        device.name4=GT-I9301I
+        device.name5=GT-I9301Q
+        supported.versions=7.1.2
+        supported.patchlevels=
+        '; }
+
+        BLOCK=/dev/block/platform/msm_sdcc.1/by-name/boot
+        IS_SLOT_DEVICE=0
+        RAMDISK_COMPRESSION=auto
+
+        . tools/ak3-core.sh
+
+        dump_boot
+        write_boot
+        EOF
+
+    - name: Create AnyKernel3 ZIP
+      run: |
+        cd anykernel3
+        ZIP_NAME="S3NeoPlus-LineageOS14.1-Kernel-AnyKernel3.zip"
+        zip -r9 "../$ZIP_NAME" . -x "*.git*"
+        cd ..
+        sha256sum "$ZIP_NAME" | tee zip.sha256
+
+    - name: Upload AnyKernel3 ZIP
+      uses: actions/upload-artifact@v4
+      with:
+        name: S3NeoPlus-LineageOS14.1-Kernel-AnyKernel3
+        path: |
+          S3NeoPlus-LineageOS14.1-Kernel-AnyKernel3.zip
+          zip.sha256
+
+    - name: Save commit SHAs
+      if: always()
+      run: |
+        echo "Kernel (s3ve3g): ${{ env.KERNEL_S3VE3G_COMMIT }}"
+        echo "Kernel (msm8226): ${{ env.KERNEL_MSM8226_COMMIT }}"
+        echo "qcom_common: ${{ env.QCOM_COMMON_COMMIT }}"
